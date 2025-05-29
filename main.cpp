@@ -12,10 +12,12 @@
 #include <cmath>
 #include <chrono>
 #include <mpi.h>  // Include MPI header
+#include "logger.h"  // Include our custom logger
 
 NS_LOG_COMPONENT_DEFINE("GossipApp");
 
 using namespace ns3;
+using namespace BeamSimLogger;  // Using our logger namespace
 
 // Structure to hold signature information for MPI communication
 struct SignatureMessage {
@@ -177,15 +179,20 @@ public:
 
     void ReceiveSubnetAggregation(uint32_t subnetId) {
         if (m_receivedSubnets.insert(subnetId).second) {
-            PrintWithTime("GlobalAggregator received aggregation from subnet " + std::to_string(subnetId) +
-                         " (Round " + std::to_string(m_currentRound) + "/" + std::to_string(m_totalRounds) + ")");
+            // Use the improved logging with consistent round information
+            LogRound("GlobalAggregator received aggregation from subnet " + std::to_string(subnetId),
+                     m_currentRound, m_totalRounds);
 
             if (m_receivedSubnets.size() == m_nSubnets) {
                 if (m_currentRound < m_totalRounds) {
+                    // Store previous round for logging
+                    int prevRound = m_currentRound;
+
                     // Start next round
                     m_currentRound++;
-                    PrintWithTime("Round " + std::to_string(m_currentRound-1) + " complete. Starting round " +
-                                 std::to_string(m_currentRound) + "...");
+
+                    // Use special formatting for round transitions with visual separator
+                    LogRoundChange(prevRound, m_currentRound, m_totalRounds);
 
                     // Clear received subnets for the next round
                     m_receivedSubnets.clear();
@@ -195,8 +202,7 @@ public:
                 } else {
                     // All rounds complete
                     m_completionTime = Simulator::Now().GetSeconds(); // Record when work actually completes
-                    PrintWithTime(
-                        "All subnet aggregations received for all " + std::to_string(m_totalRounds) +
+                    Log("All subnet aggregations received for all " + std::to_string(m_totalRounds) +
                         " rounds. Stopping simulation.");
                     Simulator::Stop();
                 }
@@ -218,7 +224,8 @@ public:
 
     // Signal to start a new round
     void StartNextRound() {
-        PrintWithTime("GlobalAggregator signaling start of round " + std::to_string(m_currentRound));
+        LogRound("GlobalAggregator signaling start of round " + std::to_string(m_currentRound),
+                m_currentRound, m_totalRounds);
         // This event will be observed by the master MPI process which will broadcast to workers
     }
 
@@ -228,13 +235,6 @@ private:
     uint32_t m_totalRounds;
     std::set<uint32_t> m_receivedSubnets;
     double m_completionTime; // Store the actual completion time
-
-    void PrintWithTime(const std::string &msg) {
-        double timeInSeconds = Simulator::Now().GetSeconds();
-        int milliseconds = static_cast<int>((timeInSeconds - std::floor(timeInSeconds)) * 1000);
-        std::cout << std::fixed << std::setprecision(0) << std::floor(timeInSeconds) << "."
-                << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
-    }
 };
 
 // --- SubnetAggregatorApp ---
@@ -249,19 +249,23 @@ public:
         m_mpiRank = mpiRank;
         m_mpiMaster = (mpiRank == 0);
         m_currentRound = 1;
+        m_totalRounds = globalAgg ? globalAgg->GetTotalRounds() : 3; // Default to 3 rounds if no global aggregator
     }
 
     void ReceiveSignature(uint32_t peerId) {
         if (m_receivedPeers.insert(peerId).second) {
             // if (m_receivedPeers.size() % 10 == 0) {
-            //     PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-            //                   " received " + std::to_string(m_receivedPeers.size()) + " signatures from subnet " +
-            //                   std::to_string(m_subnetId) + " (Round " + std::to_string(m_currentRound) + ")");
+            //     LogRoundMPI("SA from subnet " + std::to_string(m_subnetId) +
+            //                 " received " + std::to_string(m_receivedPeers.size()) + " signatures from subnet " +
+            //                 std::to_string(m_subnetId),
+            //                 m_currentRound, m_totalRounds, m_mpiRank);
             // }
             if (m_receivedPeers.size() == m_threshold) {
-                PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                              " reached threshold of " + std::to_string(m_threshold) +
-                              " signatures. Preparing to send aggregation for round " + std::to_string(m_currentRound));
+                LogRoundMPI("SA from subnet " + std::to_string(m_subnetId) +
+                           " reached threshold of " + std::to_string(m_threshold) +
+                           " signatures. Preparing to send aggregation",
+                           m_currentRound, m_totalRounds, m_mpiRank);
+
                 Simulator::Schedule(Seconds(0.01), &SubnetAggregatorApp::SendAggregation, this);
             }
         }
@@ -280,8 +284,9 @@ public:
     }
 
     void SendAggregation() {
-        PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                      " sending aggregation to global aggregator (Round " + std::to_string(m_currentRound) + ")");
+        LogRoundMPI("SA from subnet " + std::to_string(m_subnetId) +
+                   " sending aggregation to global aggregator",
+                   m_currentRound, m_totalRounds, m_mpiRank);
 
         if (m_mpiMaster) {
             // Only send to global aggregator if we're on the master process
@@ -293,8 +298,9 @@ public:
             uint32_t data = m_subnetId;
             MPI_Send(&data, 1, MPI_UINT32_T, destination, tag, MPI_COMM_WORLD);
 
-            PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                          " sent aggregation to master process via MPI (Round " + std::to_string(m_currentRound) + ")");
+            LogRoundMPI("SA from subnet " + std::to_string(m_subnetId) +
+                       " sent aggregation to master process via MPI",
+                       m_currentRound, m_totalRounds, m_mpiRank);
         }
     }
 
@@ -305,8 +311,9 @@ public:
 
         // Notify peers to start a new round of gossip - but only if previous round is complete
         if (m_peerApps && m_peerApps->size() > 0) {
-            PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                          " starting round " + std::to_string(m_currentRound));
+            LogRoundMPI("SA from subnet " + std::to_string(m_subnetId) +
+                       " starting round " + std::to_string(m_currentRound),
+                       m_currentRound, m_totalRounds, m_mpiRank);
 
             // Reset all peers for the new round first
             for (uint32_t i = 0; i < m_nPeers; i++) {
@@ -361,7 +368,7 @@ public:
             MPI_Send(&newRound, 1, MPI_UINT32_T, i, 999, MPI_COMM_WORLD);
         }
 
-        PrintWithTime("Master process broadcast round change to " + std::to_string(newRound));
+        LogMPI("Master process broadcast round change to " + std::to_string(newRound), 0);
     }
 
     void MonitorSignatures() {
@@ -388,18 +395,12 @@ private:
     uint32_t m_nPeers;
     uint32_t m_threshold;
     uint32_t m_currentRound;
+    uint32_t m_totalRounds;
     std::set<uint32_t> m_receivedPeers;
     Ptr<GlobalAggregatorApp> m_globalAgg;
     std::vector<Ptr<PeerApp> > *m_peerApps; // Pointer to all peer apps in the subnet
     int m_mpiRank;
     bool m_mpiMaster;
-
-    void PrintWithTime(const std::string &msg) {
-        double timeInSeconds = Simulator::Now().GetSeconds();
-        int milliseconds = static_cast<int>((timeInSeconds - std::floor(timeInSeconds)) * 1000);
-        std::cout << std::fixed << std::setprecision(0) << std::floor(timeInSeconds) << "."
-                << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
-    }
 };
 
 // Receive messages from worker processes (in master process)
@@ -419,8 +420,9 @@ void CheckForMPIMessages(Ptr<GlobalAggregatorApp> globalAggApp, int world_size) 
             // Process the subnet aggregation
             globalAggApp->ReceiveSubnetAggregation(data);
 
-            std::cout << Simulator::Now().GetSeconds() << " ms: Master received subnet aggregation via MPI from subnet "
-                      << data << " (process " << status.MPI_SOURCE << ")" << std::endl;
+            // Use the new logging system with process information
+            LogMPI("Master received subnet aggregation via MPI from subnet " +
+                  std::to_string(data), status.MPI_SOURCE);
         }
     }
 
@@ -445,8 +447,9 @@ void CheckForMPIRoundChanges(std::vector<Ptr<SubnetAggregatorApp>> &subnetAggApp
         // Receive the round change message
         MPI_Recv(&newRound, 1, MPI_UINT32_T, 0, 999, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        std::cout << Simulator::Now().GetSeconds() << " ms: Process " << world_rank
-                  << " received round change to " << newRound << std::endl;
+        // Use special process-specific logging
+        LogMPI("Process " + std::to_string(world_rank) + " received round change to " +
+              std::to_string(newRound), world_rank);
 
         // Notify all subnet aggregators on this process about the round change
         for (auto aggApp : subnetAggApps) {
