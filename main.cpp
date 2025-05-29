@@ -9,6 +9,7 @@
 #include <map>
 #include <iomanip>
 #include <cmath>
+#include <chrono>
 
 NS_LOG_COMPONENT_DEFINE("GossipApp");
 
@@ -48,13 +49,13 @@ public:
                 std::vector<uint32_t> targets = SelectRandomPeers(m_fanOut);
 
                 // Forward to selected peers
-                for (uint32_t targetId : targets) {
+                for (uint32_t targetId: targets) {
                     // Avoid sending to self or to original source
                     if (targetId != m_peerId && targetId != originPeerId) {
                         // Add small delay for each gossip message
-                        double delay = 0.001 + (0.001 * ((double)rand() / RAND_MAX));  // Small random delay
+                        double delay = 0.001 + (0.001 * ((double) rand() / RAND_MAX)); // Small random delay
                         Simulator::Schedule(Seconds(delay), &PeerApp::ReceiveGossipSignature,
-                                           (*m_peerApps)[targetId], originPeerId);
+                                            (*m_peerApps)[targetId], originPeerId);
                     }
                 }
             }
@@ -82,7 +83,7 @@ public:
     }
 
     // Get all received signatures
-    const std::set<uint32_t>& GetReceivedSignatures() const {
+    const std::set<uint32_t> &GetReceivedSignatures() const {
         return m_receivedSignatures;
     }
 
@@ -91,14 +92,14 @@ private:
     uint32_t m_nPeers;
     uint32_t m_fanOut;
     Ptr<SubnetAggregatorApp> m_aggregator;
-    std::set<uint32_t> m_receivedSignatures;  // Track signatures we've seen
-    std::vector<Ptr<PeerApp>>* m_peerApps;    // Pointer to all peer apps in the subnet
+    std::set<uint32_t> m_receivedSignatures; // Track signatures we've seen
+    std::vector<Ptr<PeerApp> > *m_peerApps; // Pointer to all peer apps in the subnet
 
-    void PrintWithTime(const std::string& msg) {
+    void PrintWithTime(const std::string &msg) {
         double timeInSeconds = Simulator::Now().GetSeconds();
         int milliseconds = static_cast<int>((timeInSeconds - std::floor(timeInSeconds)) * 1000);
         std::cout << std::fixed << std::setprecision(0) << std::floor(timeInSeconds) << "."
-                  << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
+                << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
     }
 
     std::vector<uint32_t> SelectRandomPeers(uint32_t count) {
@@ -139,7 +140,9 @@ public:
         if (m_receivedSubnets.insert(subnetId).second) {
             PrintWithTime("GlobalAggregator received aggregation from subnet " + std::to_string(subnetId));
             if (m_receivedSubnets.size() == m_nSubnets) {
-                PrintWithTime("All subnet aggregations received (" + std::to_string(m_nSubnets) + "/" + std::to_string(m_nSubnets) + "). Stopping simulation.");
+                PrintWithTime(
+                    "All subnet aggregations received (" + std::to_string(m_nSubnets) + "/" + std::to_string(m_nSubnets)
+                    + "). Stopping simulation.");
                 Simulator::Stop();
             }
         }
@@ -149,18 +152,19 @@ private:
     uint32_t m_nSubnets;
     std::set<uint32_t> m_receivedSubnets;
 
-    void PrintWithTime(const std::string& msg) {
+    void PrintWithTime(const std::string &msg) {
         double timeInSeconds = Simulator::Now().GetSeconds();
         int milliseconds = static_cast<int>((timeInSeconds - std::floor(timeInSeconds)) * 1000);
         std::cout << std::fixed << std::setprecision(0) << std::floor(timeInSeconds) << "."
-                  << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
+                << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
     }
 };
 
 // --- SubnetAggregatorApp ---
 class SubnetAggregatorApp : public Application {
 public:
-    void Setup(uint32_t subnetId, uint32_t nPeers, Ptr<GlobalAggregatorApp> globalAgg, std::vector<Ptr<PeerApp>>* peerApps = nullptr) {
+    void Setup(uint32_t subnetId, uint32_t nPeers, Ptr<GlobalAggregatorApp> globalAgg,
+               std::vector<Ptr<PeerApp> > *peerApps = nullptr) {
         m_subnetId = subnetId;
         m_nPeers = nPeers;
         m_globalAgg = globalAgg;
@@ -171,12 +175,13 @@ public:
         if (m_receivedPeers.insert(peerId).second) {
             if (m_receivedPeers.size() % 10 == 0) {
                 PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                        " received " + std::to_string(m_receivedPeers.size()) + " signatures from subnet " +
-                        std::to_string(m_subnetId));
+                              " received " + std::to_string(m_receivedPeers.size()) + " signatures from subnet " +
+                              std::to_string(m_subnetId));
             }
             if (m_receivedPeers.size() == m_threshold) {
                 PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                        " reached threshold of " + std::to_string(m_threshold) + " signatures. Preparing to send aggregation.");
+                              " reached threshold of " + std::to_string(m_threshold) +
+                              " signatures. Preparing to send aggregation.");
                 Simulator::Schedule(Seconds(0.01), &SubnetAggregatorApp::SendAggregation, this);
             }
         }
@@ -191,7 +196,7 @@ public:
 
     void SendAggregation() {
         PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                " sending aggregation to global aggregator");
+                      " sending aggregation to global aggregator");
         m_globalAgg->ReceiveSubnetAggregation(m_subnetId);
     }
 
@@ -201,10 +206,10 @@ public:
             // Check each peer's signatures and update our record
             for (uint32_t i = 0; i < m_nPeers; i++) {
                 Ptr<PeerApp> peer = (*m_peerApps)[i];
-                const std::set<uint32_t>& peerSigs = peer->GetReceivedSignatures();
+                const std::set<uint32_t> &peerSigs = peer->GetReceivedSignatures();
 
                 // Add all signatures from this peer to our record
-                for (uint32_t sigId : peerSigs) {
+                for (uint32_t sigId: peerSigs) {
                     ReceiveSignature(sigId);
                 }
             }
@@ -220,21 +225,24 @@ private:
     uint32_t m_threshold;
     std::set<uint32_t> m_receivedPeers;
     Ptr<GlobalAggregatorApp> m_globalAgg;
-    std::vector<Ptr<PeerApp>>* m_peerApps; // Pointer to all peer apps in the subnet
+    std::vector<Ptr<PeerApp> > *m_peerApps; // Pointer to all peer apps in the subnet
 
-    void PrintWithTime(const std::string& msg) {
+    void PrintWithTime(const std::string &msg) {
         double timeInSeconds = Simulator::Now().GetSeconds();
         int milliseconds = static_cast<int>((timeInSeconds - std::floor(timeInSeconds)) * 1000);
         std::cout << std::fixed << std::setprecision(0) << std::floor(timeInSeconds) << "."
-                  << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
+                << std::setfill('0') << std::setw(3) << milliseconds << " ms: " << msg << std::endl;
     }
 };
 
 int main(int argc, char *argv[]) {
     LogComponentEnable("GossipApp", LOG_LEVEL_INFO);
-    NS_LOG_INFO("Starting ns-3 subnet aggregation simulation");
+
+    // Record start time
+    std::chrono::steady_clock::time_point realStartTime = std::chrono::steady_clock::now();
+
     const uint32_t nSubnets = 5;
-    const uint32_t nPeersPerSubnet = 128;
+    const uint32_t nPeersPerSubnet = 256;
     NodeContainer globalAggNode;
     globalAggNode.Create(1);
     Ptr<GlobalAggregatorApp> globalAggApp = CreateObject<GlobalAggregatorApp>();
@@ -242,7 +250,7 @@ int main(int argc, char *argv[]) {
     globalAggNode.Get(0)->AddApplication(globalAggApp);
     std::vector<Ptr<SubnetAggregatorApp> > subnetAggApps(nSubnets);
     std::vector<NodeContainer> subnetNodes(nSubnets);
-    std::vector<std::vector<Ptr<PeerApp>>> peerApps(nSubnets);
+    std::vector<std::vector<Ptr<PeerApp> > > peerApps(nSubnets);
     // Create subnets and install apps
     for (uint32_t s = 0; s < nSubnets; ++s) {
         subnetNodes[s].Create(nPeersPerSubnet + 1); // +1 for aggregator
@@ -259,8 +267,32 @@ int main(int argc, char *argv[]) {
             peerApps[s][p] = peerApp;
         }
     }
+
     Simulator::Stop(Seconds(10.0)); // Failsafe
+    std::cout << "Starting ns-3 subnet aggregation simulation" << std::endl;
+
+    // Record simulation start time
+    double simStartTime = Simulator::Now().GetSeconds();
+
     Simulator::Run();
+
+    // Get simulation end time
+    double simEndTime = Simulator::Now().GetSeconds();
+    // Get real end time
+    std::chrono::steady_clock::time_point realEndTime = std::chrono::steady_clock::now();
+
+    // Calculate time differences
+    double virtualTimeSeconds = simEndTime - simStartTime;
+    double realTimeSeconds = std::chrono::duration_cast<std::chrono::milliseconds>(realEndTime - realStartTime).count() / 1000.0;
+
+    // Print statistics
+    std::cout << "\n--- SIMULATION STATISTICS ---" << std::endl;
+    std::cout << "Total virtual time: " << std::fixed << std::setprecision(3) << virtualTimeSeconds << " seconds" << std::endl;
+    std::cout << "Total real execution time: " << std::fixed << std::setprecision(3) << realTimeSeconds << " seconds" << std::endl;
+    std::cout << "Ratio (virtual/real): " << std::fixed << std::setprecision(6) << (virtualTimeSeconds / realTimeSeconds) << std::endl;
+    std::cout << "Total number of peers: " << nSubnets * nPeersPerSubnet << std::endl;
+    std::cout << "----------------------------" << std::endl;
+
     Simulator::Destroy();
     return 0;
 }
