@@ -85,6 +85,7 @@ You can configure the simulation using the following command-line options:
 |-----------|-------------|---------|
 | `--nSubnets=<value>` | Number of subnets in the simulation | 5       |
 | `--nPeersPerSubnet=<value>` | Number of peers in each subnet | 512     |
+| `--nRounds=<value>` | Number of rounds of aggregation to run sequentially | 5       |
 
 ### Examples
 
@@ -92,11 +93,11 @@ You can configure the simulation using the following command-line options:
 # Run with 4 MPI processes using default settings
 mpirun -np 4 ./main
 
-# Run with 8 MPI processes, 50 subnets, 512 peers per subnet
+# Run with 8 MPI processes, 5 subnets, 512 peers per subnet
 mpirun -np 8 ./main --nSubnets=5 --nPeersPerSubnet=512
 
-# Run with 16 MPI processes, 200 subnets, 2048 peers per subnet
-mpirun -np 16 ./main --nSubnets=16 --nPeersPerSubnet=1024
+# Run with 16 MPI processes, 16 subnets, 1024 peers per subnet, 3 rounds
+mpirun -np 16 ./main --nSubnets=16 --nPeersPerSubnet=1024 --nRounds=3
 ```
 
 ## Configuration Parameters

@@ -46,6 +46,7 @@ public:
         m_peerApps = peerApps;
         m_nPeers = nPeers;
         m_fanOut = 6;  // Gossip fan-out factor
+        m_currentRound = 1;
     }
 
     virtual void StartApplication() override {
@@ -54,7 +55,7 @@ public:
     }
 
     void GossipSignature(uint32_t originPeerId) {
-        // If we haven't seen this signature before, process and forward it
+        // If we haven't seen this signature before in this round, process and forward it
         if (m_receivedSignatures.insert(originPeerId).second) {
             // Create a proper 1.5KB signature message
             SignatureMessage sig(originPeerId, /* subnetId will be set by receiver */0);
@@ -82,6 +83,15 @@ public:
     void ReceiveGossipSignature(const SignatureMessage& sig) {
         // Process the gossip message - extract the origin peer ID
         GossipSignature(sig.originPeerId);
+    }
+
+    // Reset peer state for a new round
+    void StartNewRound(uint32_t roundNumber) {
+        m_currentRound = roundNumber;
+        m_receivedSignatures.clear();
+
+        // Start by sending own signature in the new round
+        Simulator::Schedule(Seconds(0.01), &PeerApp::GossipSignature, this, m_peerId);
     }
 
     // This is kept for backward compatibility
@@ -113,6 +123,7 @@ private:
     uint32_t m_peerId;
     uint32_t m_nPeers;
     uint32_t m_fanOut;
+    uint32_t m_currentRound;
     Ptr<SubnetAggregatorApp> m_aggregator;
     std::set<uint32_t> m_receivedSignatures; // Track signatures we've seen
     std::vector<Ptr<PeerApp> > *m_peerApps; // Pointer to all peer apps in the subnet
@@ -157,20 +168,38 @@ uint64_t PeerApp::s_totalMessagesSent = 0;
 // --- GlobalAggregatorApp ---
 class GlobalAggregatorApp : public Application {
 public:
-    void Setup(uint32_t nSubnets) {
+    void Setup(uint32_t nSubnets, uint32_t nRounds = 5) {
         m_nSubnets = nSubnets;
         m_completionTime = 0.0;
+        m_currentRound = 1;
+        m_totalRounds = nRounds;
     }
 
     void ReceiveSubnetAggregation(uint32_t subnetId) {
         if (m_receivedSubnets.insert(subnetId).second) {
-            PrintWithTime("GlobalAggregator received aggregation from subnet " + std::to_string(subnetId));
+            PrintWithTime("GlobalAggregator received aggregation from subnet " + std::to_string(subnetId) +
+                         " (Round " + std::to_string(m_currentRound) + "/" + std::to_string(m_totalRounds) + ")");
+
             if (m_receivedSubnets.size() == m_nSubnets) {
-                m_completionTime = Simulator::Now().GetSeconds(); // Record when work actually completes
-                PrintWithTime(
-                    "All subnet aggregations received (" + std::to_string(m_nSubnets) + "/" + std::to_string(m_nSubnets)
-                    + "). Stopping simulation.");
-                Simulator::Stop();
+                if (m_currentRound < m_totalRounds) {
+                    // Start next round
+                    m_currentRound++;
+                    PrintWithTime("Round " + std::to_string(m_currentRound-1) + " complete. Starting round " +
+                                 std::to_string(m_currentRound) + "...");
+
+                    // Clear received subnets for the next round
+                    m_receivedSubnets.clear();
+
+                    // Notify all subnets to start next round
+                    Simulator::Schedule(Seconds(0.01), &GlobalAggregatorApp::StartNextRound, this);
+                } else {
+                    // All rounds complete
+                    m_completionTime = Simulator::Now().GetSeconds(); // Record when work actually completes
+                    PrintWithTime(
+                        "All subnet aggregations received for all " + std::to_string(m_totalRounds) +
+                        " rounds. Stopping simulation.");
+                    Simulator::Stop();
+                }
             }
         }
     }
@@ -179,8 +208,24 @@ public:
         return m_completionTime;
     }
 
+    uint32_t GetCurrentRound() const {
+        return m_currentRound;
+    }
+
+    uint32_t GetTotalRounds() const {
+        return m_totalRounds;
+    }
+
+    // Signal to start a new round
+    void StartNextRound() {
+        PrintWithTime("GlobalAggregator signaling start of round " + std::to_string(m_currentRound));
+        // This event will be observed by the master MPI process which will broadcast to workers
+    }
+
 private:
     uint32_t m_nSubnets;
+    uint32_t m_currentRound;
+    uint32_t m_totalRounds;
     std::set<uint32_t> m_receivedSubnets;
     double m_completionTime; // Store the actual completion time
 
@@ -203,19 +248,20 @@ public:
         m_peerApps = peerApps;
         m_mpiRank = mpiRank;
         m_mpiMaster = (mpiRank == 0);
+        m_currentRound = 1;
     }
 
     void ReceiveSignature(uint32_t peerId) {
         if (m_receivedPeers.insert(peerId).second) {
-            if (m_receivedPeers.size() % 10 == 0) {
-                PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                              " received " + std::to_string(m_receivedPeers.size()) + " signatures from subnet " +
-                              std::to_string(m_subnetId));
-            }
+            // if (m_receivedPeers.size() % 10 == 0) {
+            //     PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
+            //                   " received " + std::to_string(m_receivedPeers.size()) + " signatures from subnet " +
+            //                   std::to_string(m_subnetId) + " (Round " + std::to_string(m_currentRound) + ")");
+            // }
             if (m_receivedPeers.size() == m_threshold) {
                 PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
                               " reached threshold of " + std::to_string(m_threshold) +
-                              " signatures. Preparing to send aggregation.");
+                              " signatures. Preparing to send aggregation for round " + std::to_string(m_currentRound));
                 Simulator::Schedule(Seconds(0.01), &SubnetAggregatorApp::SendAggregation, this);
             }
         }
@@ -226,11 +272,16 @@ public:
 
         // Schedule periodic monitoring of signatures spread through gossip
         Simulator::Schedule(Seconds(0.1), &SubnetAggregatorApp::MonitorSignatures, this);
+
+        // If we're on the master process, check for round changes
+        if (m_mpiMaster) {
+            Simulator::Schedule(Seconds(0.1), &SubnetAggregatorApp::CheckForNextRound, this);
+        }
     }
 
     void SendAggregation() {
         PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                      " sending aggregation to global aggregator");
+                      " sending aggregation to global aggregator (Round " + std::to_string(m_currentRound) + ")");
 
         if (m_mpiMaster) {
             // Only send to global aggregator if we're on the master process
@@ -243,8 +294,74 @@ public:
             MPI_Send(&data, 1, MPI_UINT32_T, destination, tag, MPI_COMM_WORLD);
 
             PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
-                          " sent aggregation to master process via MPI");
+                          " sent aggregation to master process via MPI (Round " + std::to_string(m_currentRound) + ")");
         }
+    }
+
+    void StartNextRound(uint32_t roundNumber) {
+        // Reset for new round
+        m_currentRound = roundNumber;
+        m_receivedPeers.clear();
+
+        // Notify peers to start a new round of gossip - but only if previous round is complete
+        if (m_peerApps && m_peerApps->size() > 0) {
+            PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
+                          " starting round " + std::to_string(m_currentRound));
+
+            // Reset all peers for the new round first
+            for (uint32_t i = 0; i < m_nPeers; i++) {
+                Ptr<PeerApp> peer = (*m_peerApps)[i];
+                peer->StartNewRound(m_currentRound);
+            }
+
+            // Initiate new round of gossip after a brief delay to ensure clean separation between rounds
+            Simulator::Schedule(Seconds(0.05), &SubnetAggregatorApp::InitiateNewRound, this);
+        }
+    }
+
+    void InitiateNewRound() {
+        // Start the new round with each peer sending its own signature
+        if (m_peerApps && m_peerApps->size() > 0) {
+            for (uint32_t i = 0; i < m_nPeers; i++) {
+                Ptr<PeerApp> peer = (*m_peerApps)[i];
+                Simulator::Schedule(Seconds(0.01 + (0.001 * (double)i)), &PeerApp::GossipSignature, peer, peer->GetPeerId());
+            }
+        }
+    }
+
+    void CheckForNextRound() {
+        if (m_globalAgg) {
+            uint32_t globalCurrentRound = m_globalAgg->GetCurrentRound();
+
+            // If global aggregator moved to a new round, update our state
+            if (globalCurrentRound > m_currentRound) {
+                StartNextRound(globalCurrentRound);
+
+                // Broadcast round change to worker processes
+                if (m_mpiMaster) {
+                    BroadcastRoundChange(globalCurrentRound);
+                }
+            }
+        }
+
+        // Schedule next check
+        Simulator::Schedule(Seconds(0.1), &SubnetAggregatorApp::CheckForNextRound, this);
+    }
+
+    void BroadcastRoundChange(uint32_t newRound) {
+        // Only the master process should broadcast
+        if (!m_mpiMaster)
+            return;
+
+        int world_size;
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+        // Broadcast to all worker processes
+        for (int i = 1; i < world_size; i++) {
+            MPI_Send(&newRound, 1, MPI_UINT32_T, i, 999, MPI_COMM_WORLD);
+        }
+
+        PrintWithTime("Master process broadcast round change to " + std::to_string(newRound));
     }
 
     void MonitorSignatures() {
@@ -270,6 +387,7 @@ private:
     uint32_t m_subnetId;
     uint32_t m_nPeers;
     uint32_t m_threshold;
+    uint32_t m_currentRound;
     std::set<uint32_t> m_receivedPeers;
     Ptr<GlobalAggregatorApp> m_globalAgg;
     std::vector<Ptr<PeerApp> > *m_peerApps; // Pointer to all peer apps in the subnet
@@ -310,6 +428,36 @@ void CheckForMPIMessages(Ptr<GlobalAggregatorApp> globalAggApp, int world_size) 
     Simulator::Schedule(Seconds(0.01), &CheckForMPIMessages, globalAggApp, world_size);
 }
 
+// Receive messages from master process (in worker processes)
+void CheckForMPIRoundChanges(std::vector<Ptr<SubnetAggregatorApp>> &subnetAggApps, int world_rank) {
+    // Only worker processes should check for round change messages
+    if (world_rank == 0)
+        return;
+
+    MPI_Status status;
+    int flag = 0;
+    uint32_t newRound;
+
+    // Check for round change messages from the master process
+    MPI_Iprobe(0, 999, MPI_COMM_WORLD, &flag, &status);
+
+    if (flag) {
+        // Receive the round change message
+        MPI_Recv(&newRound, 1, MPI_UINT32_T, 0, 999, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+        std::cout << Simulator::Now().GetSeconds() << " ms: Process " << world_rank
+                  << " received round change to " << newRound << std::endl;
+
+        // Notify all subnet aggregators on this process about the round change
+        for (auto aggApp : subnetAggApps) {
+            aggApp->StartNextRound(newRound);
+        }
+    }
+
+    // Schedule next check
+    Simulator::Schedule(Seconds(0.02), &CheckForMPIRoundChanges, std::ref(subnetAggApps), world_rank);
+}
+
 int main(int argc, char *argv[]) {
     // Initialize MPI
     MPI_Init(&argc, &argv);
@@ -335,11 +483,13 @@ int main(int argc, char *argv[]) {
     // Configuration
     uint32_t nSubnets = 5; // Default total number of subnets across all processes
     uint32_t nPeersPerSubnet = 512; // Default number of peers per subnet
+    uint32_t nRounds = 5; // Default number of rounds of aggregation
 
     // Parse command line arguments
     CommandLine cmd;
     cmd.AddValue("nSubnets", "Total number of subnets across all processes", nSubnets);
     cmd.AddValue("nPeersPerSubnet", "Number of peers per subnet", nPeersPerSubnet);
+    cmd.AddValue("nRounds", "Number of rounds of aggregation to run sequentially", nRounds);
     cmd.Parse(argc, argv);
 
     // Calculate which subnets to process on this rank
@@ -351,7 +501,7 @@ int main(int argc, char *argv[]) {
 
     if (world_rank == 0) {
         std::cout << "Running simulation with " << world_size << " MPI processes" << std::endl;
-        std::cout << "Total subnets: " << nSubnets << ", peers per subnet: " << nPeersPerSubnet << std::endl;
+        std::cout << "Total subnets: " << nSubnets << ", peers per subnet: " << nPeersPerSubnet << ", rounds: " << nRounds << std::endl;
     }
 
     std::cout << "Process " << world_rank << " handling subnets " << my_subnet_start
@@ -364,7 +514,7 @@ int main(int argc, char *argv[]) {
     if (world_rank == 0) {
         globalAggNode.Create(1);
         globalAggApp = CreateObject<GlobalAggregatorApp>();
-        globalAggApp->Setup(nSubnets);
+        globalAggApp->Setup(nSubnets, nRounds);
         globalAggNode.Get(0)->AddApplication(globalAggApp);
 
         // Schedule regular checks for MPI messages
@@ -397,7 +547,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    Simulator::Stop(Seconds(10.0));  // Failsafe
+    // Schedule regular checks for MPI round changes in worker processes
+    if (world_rank != 0) {
+        Simulator::Schedule(Seconds(0.1), &CheckForMPIRoundChanges, std::ref(subnetAggApps), world_rank);
+    }
+
+    // Set longer timeout to ensure simulation completes all rounds
+    Simulator::Stop(Seconds(60.0));  // Increased from 10.0 to 60.0 seconds
 
     if (world_rank == 0) {
         std::cout << "Starting ns-3 subnet aggregation simulation" << std::endl;
