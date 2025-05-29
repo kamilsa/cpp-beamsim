@@ -21,9 +21,15 @@ using namespace ns3;
 struct SignatureMessage {
     uint32_t originPeerId;
     uint32_t subnetId;
+    // Add padding to make the signature size 1.5KB (1536 bytes)
+    // 1536 - 8 (two uint32_t fields) = 1528 bytes of padding
+    char signatureData[1528];
 
     SignatureMessage(uint32_t origin = 0, uint32_t subnet = 0)
-        : originPeerId(origin), subnetId(subnet) {}
+        : originPeerId(origin), subnetId(subnet) {
+        // Initialize with zeros - no need for random data in simulation
+        std::memset(signatureData, 0, sizeof(signatureData));
+    }
 };
 
 // --- PeerApp ---
@@ -47,6 +53,9 @@ public:
     void GossipSignature(uint32_t originPeerId) {
         // If we haven't seen this signature before, process and forward it
         if (m_receivedSignatures.insert(originPeerId).second) {
+            // Create a proper 1.5KB signature message
+            SignatureMessage sig(originPeerId, /* subnetId will be set by receiver */0);
+
             // Select random peers to forward to (fan-out peers)
             if (m_peerApps && m_peerApps->size() > 0) {
                 // Generate random targets for gossip
@@ -59,16 +68,16 @@ public:
                         // Add small delay for each gossip message
                         double delay = 0.001 + (0.001 * ((double) rand() / RAND_MAX)); // Small random delay
                         Simulator::Schedule(Seconds(delay), &PeerApp::ReceiveGossipSignature,
-                                            (*m_peerApps)[targetId], originPeerId);
+                                            (*m_peerApps)[targetId], sig);
                     }
                 }
             }
         }
     }
 
-    void ReceiveGossipSignature(uint32_t originPeerId) {
-        // Process the gossip message
-        GossipSignature(originPeerId);
+    void ReceiveGossipSignature(const SignatureMessage& sig) {
+        // Process the gossip message - extract the origin peer ID
+        GossipSignature(sig.originPeerId);
     }
 
     // This is kept for backward compatibility
