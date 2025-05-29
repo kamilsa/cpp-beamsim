@@ -37,6 +37,9 @@ class SubnetAggregatorApp;
 
 class PeerApp : public Application {
 public:
+    // Add static counter for total messages sent
+    static uint64_t s_totalMessagesSent;
+
     void Setup(uint32_t peerId, Ptr<SubnetAggregatorApp> aggregator, std::vector<Ptr<PeerApp>>* peerApps = nullptr, uint32_t nPeers = 0) {
         m_peerId = peerId;
         m_aggregator = aggregator;
@@ -69,6 +72,7 @@ public:
                         double delay = 0.001 + (0.001 * ((double) rand() / RAND_MAX)); // Small random delay
                         Simulator::Schedule(Seconds(delay), &PeerApp::ReceiveGossipSignature,
                                             (*m_peerApps)[targetId], sig);
+                        s_totalMessagesSent++; // Increment total messages sent
                     }
                 }
             }
@@ -98,6 +102,11 @@ public:
     // Get all received signatures
     const std::set<uint32_t> &GetReceivedSignatures() const {
         return m_receivedSignatures;
+    }
+
+    // Static method to get total messages sent
+    static uint64_t GetTotalMessagesSent() {
+        return s_totalMessagesSent;
     }
 
 private:
@@ -141,6 +150,9 @@ private:
         return result;
     }
 };
+
+// Initialize static member
+uint64_t PeerApp::s_totalMessagesSent = 0;
 
 // --- GlobalAggregatorApp ---
 class GlobalAggregatorApp : public Application {
@@ -440,6 +452,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Total real execution time: " << std::fixed << std::setprecision(3) << max_realTimeSeconds << " seconds" << std::endl;
         std::cout << "Ratio (virtual/real): " << std::fixed << std::setprecision(6) << (max_virtualTimeSeconds / max_realTimeSeconds) << std::endl;
         std::cout << "Total number of peers: " << nSubnets * nPeersPerSubnet << std::endl;
+        std::cout << "Total messages sent: " << PeerApp::GetTotalMessagesSent() << std::endl;
         std::cout << "----------------------------" << std::endl;
     }
 
