@@ -10,10 +10,20 @@
 #include <iomanip>
 #include <cmath>
 #include <chrono>
+#include <mpi.h>  // Include MPI header
 
 NS_LOG_COMPONENT_DEFINE("GossipApp");
 
 using namespace ns3;
+
+// Structure to hold signature information for MPI communication
+struct SignatureMessage {
+    uint32_t originPeerId;
+    uint32_t subnetId;
+
+    SignatureMessage(uint32_t origin = 0, uint32_t subnet = 0)
+        : originPeerId(origin), subnetId(subnet) {}
+};
 
 // --- PeerApp ---
 class SubnetAggregatorApp;
@@ -36,13 +46,6 @@ public:
     void GossipSignature(uint32_t originPeerId) {
         // If we haven't seen this signature before, process and forward it
         if (m_receivedSignatures.insert(originPeerId).second) {
-            // Print status (less frequently to reduce output)
-            // if (m_receivedSignatures.size() % 100 == 0) {
-            //     PrintWithTime("Peer " + std::to_string(m_peerId) +
-            //                   " has received " + std::to_string(m_receivedSignatures.size()) +
-            //                   " unique signatures");
-            // }
-
             // Select random peers to forward to (fan-out peers)
             if (m_peerApps && m_peerApps->size() > 0) {
                 // Generate random targets for gossip
@@ -134,12 +137,14 @@ class GlobalAggregatorApp : public Application {
 public:
     void Setup(uint32_t nSubnets) {
         m_nSubnets = nSubnets;
+        m_completionTime = 0.0;
     }
 
     void ReceiveSubnetAggregation(uint32_t subnetId) {
         if (m_receivedSubnets.insert(subnetId).second) {
             PrintWithTime("GlobalAggregator received aggregation from subnet " + std::to_string(subnetId));
             if (m_receivedSubnets.size() == m_nSubnets) {
+                m_completionTime = Simulator::Now().GetSeconds(); // Record when work actually completes
                 PrintWithTime(
                     "All subnet aggregations received (" + std::to_string(m_nSubnets) + "/" + std::to_string(m_nSubnets)
                     + "). Stopping simulation.");
@@ -148,9 +153,14 @@ public:
         }
     }
 
+    double GetCompletionTime() const {
+        return m_completionTime;
+    }
+
 private:
     uint32_t m_nSubnets;
     std::set<uint32_t> m_receivedSubnets;
+    double m_completionTime; // Store the actual completion time
 
     void PrintWithTime(const std::string &msg) {
         double timeInSeconds = Simulator::Now().GetSeconds();
@@ -164,11 +174,13 @@ private:
 class SubnetAggregatorApp : public Application {
 public:
     void Setup(uint32_t subnetId, uint32_t nPeers, Ptr<GlobalAggregatorApp> globalAgg,
-               std::vector<Ptr<PeerApp> > *peerApps = nullptr) {
+               std::vector<Ptr<PeerApp> > *peerApps = nullptr, int mpiRank = 0) {
         m_subnetId = subnetId;
         m_nPeers = nPeers;
         m_globalAgg = globalAgg;
         m_peerApps = peerApps;
+        m_mpiRank = mpiRank;
+        m_mpiMaster = (mpiRank == 0);
     }
 
     void ReceiveSignature(uint32_t peerId) {
@@ -197,7 +209,20 @@ public:
     void SendAggregation() {
         PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
                       " sending aggregation to global aggregator");
-        m_globalAgg->ReceiveSubnetAggregation(m_subnetId);
+
+        if (m_mpiMaster) {
+            // Only send to global aggregator if we're on the master process
+            m_globalAgg->ReceiveSubnetAggregation(m_subnetId);
+        } else {
+            // Send to master process via MPI
+            int destination = 0; // Master rank
+            int tag = 1000 + m_subnetId; // Unique tag for each subnet
+            uint32_t data = m_subnetId;
+            MPI_Send(&data, 1, MPI_UINT32_T, destination, tag, MPI_COMM_WORLD);
+
+            PrintWithTime("SA from subnet " + std::to_string(m_subnetId) +
+                          " sent aggregation to master process via MPI");
+        }
     }
 
     void MonitorSignatures() {
@@ -226,6 +251,8 @@ private:
     std::set<uint32_t> m_receivedPeers;
     Ptr<GlobalAggregatorApp> m_globalAgg;
     std::vector<Ptr<PeerApp> > *m_peerApps; // Pointer to all peer apps in the subnet
+    int m_mpiRank;
+    bool m_mpiMaster;
 
     void PrintWithTime(const std::string &msg) {
         double timeInSeconds = Simulator::Now().GetSeconds();
@@ -235,64 +262,176 @@ private:
     }
 };
 
+// Receive messages from worker processes (in master process)
+void CheckForMPIMessages(Ptr<GlobalAggregatorApp> globalAggApp, int world_size) {
+    MPI_Status status;
+    int flag = 0;
+    uint32_t data;
+
+    // Check for messages from any source
+    for (int source = 1; source < world_size; source++) {
+        MPI_Iprobe(source, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
+
+        if (flag) {
+            // Receive the message
+            MPI_Recv(&data, 1, MPI_UINT32_T, status.MPI_SOURCE, status.MPI_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            // Process the subnet aggregation
+            globalAggApp->ReceiveSubnetAggregation(data);
+
+            std::cout << Simulator::Now().GetSeconds() << " ms: Master received subnet aggregation via MPI from subnet "
+                      << data << " (process " << status.MPI_SOURCE << ")" << std::endl;
+        }
+    }
+
+    // Schedule next check
+    Simulator::Schedule(Seconds(0.01), &CheckForMPIMessages, globalAggApp, world_size);
+}
+
 int main(int argc, char *argv[]) {
+    // Initialize MPI
+    MPI_Init(&argc, &argv);
+
+    // Get MPI process information
+    int world_size, world_rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
+    // Create MPI datatype for SignatureMessage
+    MPI_Datatype mpi_signature_type;
+    int blocklengths[2] = {1, 1};
+    MPI_Aint displacements[2] = {0, sizeof(uint32_t)};
+    MPI_Datatype types[2] = {MPI_UINT32_T, MPI_UINT32_T};
+    MPI_Type_create_struct(2, blocklengths, displacements, types, &mpi_signature_type);
+    MPI_Type_commit(&mpi_signature_type);
+
     LogComponentEnable("GossipApp", LOG_LEVEL_INFO);
 
     // Record start time
     std::chrono::steady_clock::time_point realStartTime = std::chrono::steady_clock::now();
 
-    const uint32_t nSubnets = 5;
-    const uint32_t nPeersPerSubnet = 256;
+    // Configuration
+    const uint32_t nSubnets = 100; // Total number of subnets across all processes
+    const uint32_t nPeersPerSubnet = 1024;
+
+    // Calculate which subnets to process on this rank
+    uint32_t subnets_per_rank = nSubnets / world_size;
+    uint32_t extra_subnets = nSubnets % world_size;
+    uint32_t my_subnet_start = world_rank * subnets_per_rank + std::min(world_rank, static_cast<int>(extra_subnets));
+    uint32_t my_subnet_count = subnets_per_rank + (world_rank < static_cast<int>(extra_subnets) ? 1 : 0);
+    uint32_t my_subnet_end = my_subnet_start + my_subnet_count;
+
+    if (world_rank == 0) {
+        std::cout << "Running simulation with " << world_size << " MPI processes" << std::endl;
+        std::cout << "Total subnets: " << nSubnets << ", peers per subnet: " << nPeersPerSubnet << std::endl;
+    }
+
+    std::cout << "Process " << world_rank << " handling subnets " << my_subnet_start
+              << " to " << (my_subnet_end-1) << " (" << my_subnet_count << " subnets)" << std::endl;
+
+    // Global aggregator is needed only on the master process (rank 0)
+    Ptr<GlobalAggregatorApp> globalAggApp;
     NodeContainer globalAggNode;
-    globalAggNode.Create(1);
-    Ptr<GlobalAggregatorApp> globalAggApp = CreateObject<GlobalAggregatorApp>();
-    globalAggApp->Setup(nSubnets);
-    globalAggNode.Get(0)->AddApplication(globalAggApp);
-    std::vector<Ptr<SubnetAggregatorApp> > subnetAggApps(nSubnets);
-    std::vector<NodeContainer> subnetNodes(nSubnets);
-    std::vector<std::vector<Ptr<PeerApp> > > peerApps(nSubnets);
-    // Create subnets and install apps
-    for (uint32_t s = 0; s < nSubnets; ++s) {
-        subnetNodes[s].Create(nPeersPerSubnet + 1); // +1 for aggregator
+
+    if (world_rank == 0) {
+        globalAggNode.Create(1);
+        globalAggApp = CreateObject<GlobalAggregatorApp>();
+        globalAggApp->Setup(nSubnets);
+        globalAggNode.Get(0)->AddApplication(globalAggApp);
+
+        // Schedule regular checks for MPI messages
+        Simulator::Schedule(Seconds(0.1), &CheckForMPIMessages, globalAggApp, world_size);
+    }
+
+    // Each process creates only the subnets it's responsible for
+    std::vector<Ptr<SubnetAggregatorApp>> subnetAggApps(my_subnet_count);
+    std::vector<NodeContainer> subnetNodes(my_subnet_count);
+    std::vector<std::vector<Ptr<PeerApp>>> peerApps(my_subnet_count);
+
+    // Create only subnets assigned to this process
+    for (uint32_t i = 0; i < my_subnet_count; i++) {
+        uint32_t s = my_subnet_start + i;  // Global subnet ID
+        subnetNodes[i].Create(nPeersPerSubnet + 1);  // +1 for aggregator
+
         Ptr<SubnetAggregatorApp> aggApp = CreateObject<SubnetAggregatorApp>();
-        aggApp->Setup(s, nPeersPerSubnet, globalAggApp, &peerApps[s]);
-        subnetNodes[s].Get(nPeersPerSubnet)->AddApplication(aggApp);
-        subnetAggApps[s] = aggApp;
-        peerApps[s].resize(nPeersPerSubnet);
+        aggApp->Setup(s, nPeersPerSubnet, globalAggApp, &peerApps[i], world_rank);
+        subnetNodes[i].Get(nPeersPerSubnet)->AddApplication(aggApp);
+        subnetAggApps[i] = aggApp;
+
+        peerApps[i].resize(nPeersPerSubnet);
+
         // Install PeerApps
-        for (uint32_t p = 0; p < nPeersPerSubnet; ++p) {
+        for (uint32_t p = 0; p < nPeersPerSubnet; p++) {
             Ptr<PeerApp> peerApp = CreateObject<PeerApp>();
-            peerApp->Setup(p, aggApp, &peerApps[s], nPeersPerSubnet);
-            subnetNodes[s].Get(p)->AddApplication(peerApp);
-            peerApps[s][p] = peerApp;
+            peerApp->Setup(p, aggApp, &peerApps[i], nPeersPerSubnet);
+            subnetNodes[i].Get(p)->AddApplication(peerApp);
+            peerApps[i][p] = peerApp;
         }
     }
 
-    Simulator::Stop(Seconds(10.0)); // Failsafe
-    std::cout << "Starting ns-3 subnet aggregation simulation" << std::endl;
+    Simulator::Stop(Seconds(10.0));  // Failsafe
+
+    if (world_rank == 0) {
+        std::cout << "Starting ns-3 subnet aggregation simulation" << std::endl;
+    }
 
     // Record simulation start time
     double simStartTime = Simulator::Now().GetSeconds();
 
+    // Create a barrier to ensure all processes start simulation at roughly the same time
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    // Run the simulation
     Simulator::Run();
 
-    // Get simulation end time
+    // Synchronize all processes before collecting results
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    // Get simulation end time and actual completion time
     double simEndTime = Simulator::Now().GetSeconds();
+
+    // Get the actual completion time from the global aggregator on master process
+    double actualCompletionTime = 0.0;
+    if (world_rank == 0 && globalAggApp) {
+        actualCompletionTime = globalAggApp->GetCompletionTime();
+        // If completion time is 0, it means simulation terminated at failsafe
+        if (actualCompletionTime < 0.001) {
+            actualCompletionTime = simEndTime;  // Use the simulator end time instead
+        }
+    }
+
+    // Broadcast the actual completion time to all processes
+    MPI_Bcast(&actualCompletionTime, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
     // Get real end time
     std::chrono::steady_clock::time_point realEndTime = std::chrono::steady_clock::now();
 
-    // Calculate time differences
-    double virtualTimeSeconds = simEndTime - simStartTime;
+    // Calculate time differences - use actual completion time for virtual time
+    double virtualTimeSeconds = actualCompletionTime - simStartTime;
     double realTimeSeconds = std::chrono::duration_cast<std::chrono::milliseconds>(realEndTime - realStartTime).count() / 1000.0;
 
-    // Print statistics
-    std::cout << "\n--- SIMULATION STATISTICS ---" << std::endl;
-    std::cout << "Total virtual time: " << std::fixed << std::setprecision(3) << virtualTimeSeconds << " seconds" << std::endl;
-    std::cout << "Total real execution time: " << std::fixed << std::setprecision(3) << realTimeSeconds << " seconds" << std::endl;
-    std::cout << "Ratio (virtual/real): " << std::fixed << std::setprecision(6) << (virtualTimeSeconds / realTimeSeconds) << std::endl;
-    std::cout << "Total number of peers: " << nSubnets * nPeersPerSubnet << std::endl;
-    std::cout << "----------------------------" << std::endl;
+    // Collect timing statistics from all processes
+    double max_virtualTimeSeconds;
+    double max_realTimeSeconds;
+    MPI_Reduce(&virtualTimeSeconds, &max_virtualTimeSeconds, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&realTimeSeconds, &max_realTimeSeconds, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    // Print statistics on the master process
+    if (world_rank == 0) {
+        std::cout << "\n--- SIMULATION STATISTICS ---" << std::endl;
+        std::cout << "MPI processes: " << world_size << std::endl;
+        std::cout << "Total virtual time: " << std::fixed << std::setprecision(3) << max_virtualTimeSeconds << " seconds" << std::endl;
+        std::cout << "Total real execution time: " << std::fixed << std::setprecision(3) << max_realTimeSeconds << " seconds" << std::endl;
+        std::cout << "Ratio (virtual/real): " << std::fixed << std::setprecision(6) << (max_virtualTimeSeconds / max_realTimeSeconds) << std::endl;
+        std::cout << "Total number of peers: " << nSubnets * nPeersPerSubnet << std::endl;
+        std::cout << "----------------------------" << std::endl;
+    }
 
     Simulator::Destroy();
+
+    // Clean up MPI datatype
+    MPI_Type_free(&mpi_signature_type);
+
+    MPI_Finalize();  // Finalize MPI
     return 0;
 }
