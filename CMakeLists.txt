@@ -8,7 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(MPI REQUIRED)
 
-set(ns3_DIR /Users/taisei/dev/beam_ns3_py_0/ns-allinone-3.44/install/lib/cmake/ns3)
+# Use relative path to ns3 libraries installed by setup_ns3.sh
+set(ns3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/ns-allinone-3.44/install/lib/cmake/ns3)
 find_package(ns3 CONFIG REQUIRED)
 
 add_executable(main main.cpp)
@@ -17,4 +18,5 @@ target_link_libraries(main
   ns3::core
   ns3::internet
   ns3::point-to-point
+  MPI::MPI_CXX # Add MPI libraries
 )
