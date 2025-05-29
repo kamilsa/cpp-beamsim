@@ -2,6 +2,7 @@
 #include <ns3/core-module.h>
 #include <ns3/network-module.h>
 #include <ns3/internet-module.h>
+#include <ns3/command-line.h>
 #include <set>
 #include <vector>
 #include <algorithm>
@@ -311,8 +312,14 @@ int main(int argc, char *argv[]) {
     std::chrono::steady_clock::time_point realStartTime = std::chrono::steady_clock::now();
 
     // Configuration
-    const uint32_t nSubnets = 100; // Total number of subnets across all processes
-    const uint32_t nPeersPerSubnet = 1024;
+    uint32_t nSubnets = 5; // Default total number of subnets across all processes
+    uint32_t nPeersPerSubnet = 512; // Default number of peers per subnet
+
+    // Parse command line arguments
+    CommandLine cmd;
+    cmd.AddValue("nSubnets", "Total number of subnets across all processes", nSubnets);
+    cmd.AddValue("nPeersPerSubnet", "Number of peers per subnet", nPeersPerSubnet);
+    cmd.Parse(argc, argv);
 
     // Calculate which subnets to process on this rank
     uint32_t subnets_per_rank = nSubnets / world_size;

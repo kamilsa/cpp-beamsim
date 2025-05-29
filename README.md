@@ -72,14 +72,31 @@ make
 To run the simulation with MPI:
 
 ```bash
-mpirun -np <num_processes> ./main
+mpirun -np <num_processes> ./main [options]
 ```
 
 Replace `<num_processes>` with the number of MPI processes you want to use.
 
-Example:
+### Command Line Parameters
+
+You can configure the simulation using the following command-line options:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--nSubnets=<value>` | Number of subnets in the simulation | 5       |
+| `--nPeersPerSubnet=<value>` | Number of peers in each subnet | 512     |
+
+### Examples
+
 ```bash
+# Run with 4 MPI processes using default settings
 mpirun -np 4 ./main
+
+# Run with 8 MPI processes, 50 subnets, 512 peers per subnet
+mpirun -np 8 ./main --nSubnets=5 --nPeersPerSubnet=512
+
+# Run with 16 MPI processes, 200 subnets, 2048 peers per subnet
+mpirun -np 16 ./main --nSubnets=16 --nPeersPerSubnet=1024
 ```
 
 ## Configuration Parameters
